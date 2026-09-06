@@ -1,360 +1,437 @@
+"""MCP-Server fuer Autodesk Maya.
 
-import os
-import logging
+Spricht ueber stdio mit dem MCP-Client und ueber einen lokalen Socket mit dem
+Listener in Maya (maya_module/scripts/maya_mcp_listener.py).
+"""
+
 import json
+import logging
+import os
 import socket
-import inspect
-import importlib
-import traceback
-from enum import Enum
-from typing import Sequence, List, Any, Dict, Optional, get_origin
-import pprint
-from itertools import chain
+import struct
+import sys
+from typing import Any
 
-import mcp.server.stdio
-from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
-from mcp.server.fastmcp.utilities.func_metadata import func_metadata
-from mcp.server.fastmcp.utilities.types import Image
-from mcp.server.fastmcp.server import Context
-from mcp.server.lowlevel import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
-import pydantic_core
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
+__version__ = "1.0.0"
 
-__version__ = "0.1.0"
+DEFAULT_HOST = os.environ.get("MAYA_MCP_HOST", "127.0.0.1")
+DEFAULT_PORT = int(os.environ.get("MAYA_MCP_PORT", "50777"))
+DEFAULT_TIMEOUT = float(os.environ.get("MAYA_MCP_TIMEOUT", "30"))
 
-SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
-
-LoggingLevel = logging.DEBUG
-
-
-LOCAL_HOST = '127.0.0.1'
-
-# Default MEL command port that Maya listens
-DEFAULT_COMMAND_PORT = 50007
-
+_HEADER = struct.Struct(">I")
 
 logging.basicConfig(
-    level=LoggingLevel,
-    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(SCRIPT_DIRECTORY, 'maya_mcp_server.log')),
-    ]
+    level=os.environ.get("MAYA_MCP_LOGLEVEL", "INFO"),
+    stream=sys.stderr,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logger = logging.getLogger("maya-mcp")
 
-logger = logging.getLogger("MayaMCP")
-
-_operation_manager = None
-
-
-class MayaConnection:
-    """ connection to the Maya instance """
-
-    def __init__(self, host:str=LOCAL_HOST, port:int=DEFAULT_COMMAND_PORT):
-        self.host = host
-        self.port = port
-
-    @staticmethod
-    def _encode_python_to_mel_python(python_code:str) -> str:
-        mel = python_code.replace('"', '\\"')
-        mel = mel.replace('\n', '\\n')
-        return f'python("{mel}")'
-
-    @staticmethod
-    def _update_script_to_capture_stdout(python_script:str) -> str:
-        spaced_python_script = '    ' + python_script.replace('\n', '\n    ')
-        return f"""
-import io
-import contextlib
-_mcp_io_buf = io.StringIO()
-with contextlib.redirect_stdout(_mcp_io_buf):
-{spaced_python_script}
-_mcp_maya_results = _mcp_io_buf.getvalue()
-"""
-
-    def _send_python_command(self, python_script:str) -> str:
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client.connect((self.host, self.port))
-
-        mel = MayaConnection._encode_python_to_mel_python(python_script)
-
-        client.send(mel.encode('utf-8'))
-
-        result = data = client.recv(1024)
-        while len(data) == 1024:
-            data = client.recv(1024)
-            result += data
-
-        if result:
-            result = result.decode('utf-8')
-        else:
-            result = None
-
-        client.close()
-
-        return result
+mcp = MCPServer("maya")
 
 
-    class ScriptReturn(Enum):
-        STDOUT = "stdout"
-        JSON = "json"
-        NONE = "none"
-
-    def run_python_script(
-        self,
-        python_script:str, 
-        *, 
-        returns:ScriptReturn = ScriptReturn.JSON
-    ):
-        if returns == MayaConnection.ScriptReturn.STDOUT:
-            python_script = MayaConnection._update_script_to_capture_stdout(python_script)
-        else:
-            python_script = "_mcp_maya_results = None\n" + python_script
-
-        result = self._send_python_command(python_script)
-
-        # strip any extra characters added at the end
-        result = result.replace(chr(0), '')
-        result = result.replace(chr(10), '')
-
-        if returns != MayaConnection.ScriptReturn.NONE and (not result or result == '\n'):
-            result = self._send_python_command("_mcp_maya_results")
-            # strip any extra characters added at the end
-            result = result.replace(chr(0), '')
-            result = result.replace(chr(10), '')
-
-        if returns != MayaConnection.ScriptReturn.NONE:
-            try:
-                result = json.loads(result)
-            except:
-                # if unable to parse as JSON, just return as is
-                pass
-
-        return result
+class MayaUnavailable(ToolError):
+    """Maya ist nicht erreichbar; die Nachricht geht an den MCP-Client."""
 
 
-class OperationsManager():
-    """ manages the tools, resources and prompts """
-
-    def __init__(self):
-        self._paths = {}
-        self._tools = {}
-
-    def has_tool(self, name:str) -> bool:
-        return name in self._tools
-
-    def get_tool(self, name:str) -> Tool:
-        if name in self._tools:
-            return self._tools[name]
-        return None
-
-    def get_file_path(self, name:str) -> Tool:
-        if name in self._paths:
-            return self._paths[name]
-        return None
-
-    def get_tools(self) -> List[Tool]:
-        return self._tools.values()
-
-    def find_tools(self):
-        """ find all the MCP types.Tool in the mayatools directory """
-        for root, dirs, files in os.walk(os.path.join(SCRIPT_DIRECTORY, "mayatools")):
-            for file in files:
-                if file.endswith(".py"):
-                     name, _ = os.path.splitext(file)
-                     path = os.path.join(root, file)
-                     tool = OperationsManager._get_function_tool(name, path)
-
-                     if tool:
-                         self._paths[name] = path
-                         self._tools[name] = tool
-
-    @staticmethod
-    def _get_function_tool(maya_tool_name, filename:str) -> Tool:
-        """ attempt to load a python file as a MCP types.Tool and read the function signature and docs """
-        try:
-            spec = importlib.util.spec_from_file_location(maya_tool_name, filename)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            fn = getattr(module, maya_tool_name)
-        except Exception as e:
-            logger.error(f"Unable to pre-load {maya_tool_name} because: {e}")
-            return None
-
-        func_doc = fn.__doc__ or ""
-
-        is_async = inspect.iscoroutinefunction(fn)
-
-        sig = inspect.signature(fn)
-        context_kwarg = None
-        for param_name, param in sig.parameters.items():
-            if get_origin(param.annotation) is not None:
-                continue
-            if issubclass(param.annotation, Context):
-                context_kwarg = param_name
-                break
-
-        func_arg_metadata = func_metadata(
-            fn,
-            skip_names=[context_kwarg] if context_kwarg is not None else [],
-        )
-        parameters = func_arg_metadata.arg_model.model_json_schema()
-
-        tool = Tool(
-            name=maya_tool_name,
-            description=func_doc,
-            inputSchema=parameters
-        )
-
-        return tool
+class MayaError(ToolError):
+    """Der Code lief in Maya, endete dort aber mit einem Fehler."""
 
 
-def wrap_script_in_scoped_function(python_script:str, maya_tool_name:str, args:List[str]) -> str:
-    spaced_python_script = '    ' + python_script.replace('\n', '\n    ')
-    return f"""
-def _mcp_maya_scope({','.join(args)}):
-    import json
-    import traceback
-    from pprint import pprint
-{spaced_python_script}
+def _recv_exactly(sock: socket.socket, size: int) -> bytes:
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = sock.recv(min(remaining, 65536))
+        if not chunk:
+            raise MayaUnavailable(
+                "Verbindung zu Maya wurde waehrend der Antwort geschlossen "
+                "(Maya beendet, Szene abgestuerzt oder Listener gestoppt)."
+            )
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _request(payload: dict, timeout: float) -> dict:
+    address = (DEFAULT_HOST, DEFAULT_PORT)
     try:
-        results = {maya_tool_name}({','.join([a + '=' + a for a in args])})
-    except Exception as e:
-        # print exception to the Maya console
-        traceback.print_exc()
-        results = dict([('success', False), ('message', 'Error: Maya tool failed with the follow message: ' + str(e))])
-
-    if results and not isinstance(results, str):
-        try:
-            results = json.dumps(results)
-        except Exception as e:
-            print("MayaMCP: Error attempting to return results from tool {maya_tool_name} as JSON")
-            pprint(results)
-            # unable to parse results as JSON, just return it
-            return str(results)
-            
-    return results
-"""
-
-
-def load_maya_tool_source(
-    maya_tool_name:str,
-    filename:str, 
-    vars:Optional[Dict[str,Any]]=None,
-    *,
-    log:bool = False
-) -> str:
-    """ load a python source file and swap in any variables """
-    with open(filename, 'r') as f:
-        script = f.read()
-
-    # add in function call to the results
-    results = wrap_script_in_scoped_function(script, maya_tool_name, vars.keys())
-    results += f"\n_mcp_maya_results = _mcp_maya_scope("
-    params = []
-    for k,v in vars.items():
-        if isinstance(v, str):
-            params.append(f"{k}='{v}'")
-        else:
-            params.append(f"{k}={v}")
-    results += ','.join(params)
-    results += ")\n\n"
-
-    if log:
-        logger.debug(results)
-
-    return results
-
-
-def convert_to_content(
-    result: Any,
-) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-    """ Convert a result to a sequence of content objects. """
-    if result is None:
-        return []
-
-    if isinstance(result, TextContent | ImageContent | EmbeddedResource):
-        return [result]
-
-    if isinstance(result, Image):
-        return [result.to_image_content()]
-
-    if isinstance(result, list | tuple):
-        return list(chain.from_iterable(convert_to_content(item) for item in result))  # type: ignore[reportUnknownVariableType]
-
-    if not isinstance(result, str):
-        try:
-            result = json.dumps(pydantic_core.to_jsonable_python(result))
-        except Exception:
-            result = str(result)
-
-    return [TextContent(type="text", text=result)]
-
-
-server = Server("MayaMCP")
-
-@server.list_tools()
-async def handle_list_tools() -> list[Tool]:
-    """ handle request from MCP client to get a list of tools """
-    logger.info("Requesting a list of tools.")
-    return _operation_manager.get_tools()
-
-
-@server.call_tool()
-async def handle_call_tool(
-    name: str, 
-    arguments: dict | None
-) -> list[TextContent | ImageContent | EmbeddedResource]:
-    """ handle request from MCP client to call tool """
-
-    logger.info(f"Calling tool {name} with arguments: {pprint.pformat(arguments)}")
-
-    path = _operation_manager.get_file_path(name)
-    if not path:
-        error_msg = f"Tool {name} not found."
-        logger.error(error_msg)
-        return {"success": False, "message": error_msg}
+        sock = socket.create_connection(address, timeout=timeout)
+    except (ConnectionRefusedError, OSError) as exc:
+        raise MayaUnavailable(
+            f"Keine Verbindung zum Maya-MCP-Listener auf {DEFAULT_HOST}:{DEFAULT_PORT} "
+            f"({exc.__class__.__name__}: {exc}). Laeuft Maya 2026 mit installiertem "
+            "MayaMCP-Modul? Im Script Editor pruefen mit: "
+            "import maya_mcp_listener; maya_mcp_listener.start()"
+        ) from exc
 
     try:
-        maya_conn = MayaConnection()
-        python_script = load_maya_tool_source(name, path, arguments)
-        results = maya_conn.run_python_script(python_script)
-        converted_results = convert_to_content(results)
-    except Exception as e:
-        logger.critical(e, exc_info=True)
-        error_msg = f"Error: tool {name} failed to run. Reason {e}"
-        logger.error(error_msg)
-        return {"success": False, "message": error_msg}
+        sock.settimeout(timeout)
+        body = json.dumps(payload).encode("utf-8")
+        sock.sendall(_HEADER.pack(len(body)) + body)
+        header = _recv_exactly(sock, _HEADER.size)
+        (size,) = _HEADER.unpack(header)
+        return json.loads(_recv_exactly(sock, size).decode("utf-8"))
+    except socket.timeout as exc:
+        raise MayaUnavailable(
+            f"Zeitueberschreitung nach {timeout}s. Maya antwortet nicht - der "
+            "Hauptthread ist belegt (modaler Dialog, laufende Berechnung) oder der "
+            "Code laeuft zu lange. Timeout-Argument erhoehen oder Maya pruefen."
+        ) from exc
+    finally:
+        sock.close()
 
-    if converted_results:
-        return converted_results
 
-    return {"success": True}
+def _exec(code: str, timeout: float = DEFAULT_TIMEOUT, mel: bool = False) -> dict:
+    response = _request(
+        {"op": "exec_mel" if mel else "exec_python", "code": code}, timeout
+    )
+    if not response.get("ok"):
+        raise MayaError(response.get("error", "Unbekannter Listener-Fehler"))
+    return response
 
 
-async def run():
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="MayaMCP",
-                server_version=__version__,
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
+def _value(code: str, timeout: float = DEFAULT_TIMEOUT) -> Any:
+    response = _exec(code, timeout)
+    if response.get("traceback"):
+        raise MayaError(response["traceback"].strip())
+    if not response.get("result_jsonable", True):
+        raise MayaError(
+            "Rueckgabewert ist nicht JSON-serialisierbar: "
+            f"{response.get('result_repr')}"
         )
+    return response.get("result")
 
 
-if __name__ == '__main__':
+@mcp.tool()
+def maya_exec_python(code: str, timeout: float = DEFAULT_TIMEOUT) -> dict:
+    """Fuehrt Python-Code im laufenden Maya aus (maya.cmds, maya.api.OpenMaya,
+    pymel falls installiert).
 
-    _operation_manager = OperationsManager()
-    _operation_manager.find_tools()
+    Der Code laeuft im Maya-Hauptthread in einem persistenten Namensraum, der
+    ueber Aufrufe hinweg erhalten bleibt. Ist das letzte Statement ein Ausdruck,
+    wird sein Wert zurueckgegeben.
 
-    logger.info(f"MayaMCP v{__version__} server starting up")
+    Args:
+        code: Python-Quelltext, mehrzeilig erlaubt.
+        timeout: Sekunden, die auf Mayas Antwort gewartet wird.
 
-    import asyncio
-    asyncio.run(run())
+    Returns:
+        stdout, result (falls JSON-faehig), result_repr und traceback.
+    """
+    return _exec(code, timeout)
 
+
+@mcp.tool()
+def maya_exec_mel(code: str, timeout: float = DEFAULT_TIMEOUT) -> dict:
+    """Fuehrt MEL-Code im laufenden Maya aus.
+
+    Args:
+        code: MEL-Quelltext.
+        timeout: Sekunden, die auf Mayas Antwort gewartet wird.
+    """
+    return _exec(code, timeout, mel=True)
+
+
+@mcp.tool()
+def maya_status() -> dict:
+    """Prueft die Verbindung zu Maya und meldet Version, Prozess-ID und Port."""
+    response = _request({"op": "ping"}, DEFAULT_TIMEOUT)
+    return {"host": DEFAULT_HOST, "port": DEFAULT_PORT, **response}
+
+
+@mcp.tool()
+def maya_scene_info() -> dict:
+    """Liefert Szenendatei, Frame-Range, Einheiten, Up-Achse und die
+    Node-Anzahl je Typ der aktuellen Maya-Szene."""
+    return _value(
+        """
+import maya.cmds as cmds
+from collections import Counter
+_nodes = cmds.ls()
+_counts = Counter(cmds.nodeType(n) for n in _nodes)
+{
+    "file": cmds.file(query=True, sceneName=True) or "",
+    "modified": cmds.file(query=True, modified=True),
+    "maya_version": cmds.about(version=True),
+    "start_frame": cmds.playbackOptions(query=True, minTime=True),
+    "end_frame": cmds.playbackOptions(query=True, maxTime=True),
+    "current_frame": cmds.currentTime(query=True),
+    "fps": cmds.currentUnit(query=True, time=True),
+    "linear_unit": cmds.currentUnit(query=True, linear=True),
+    "angular_unit": cmds.currentUnit(query=True, angle=True),
+    "up_axis": cmds.upAxis(query=True, axis=True),
+    "node_total": len(_nodes),
+    "node_counts": dict(_counts.most_common(50)),
+}
+"""
+    )
+
+
+@mcp.tool()
+def maya_list_nodes(node_type: str = "", pattern: str = "", limit: int = 200) -> dict:
+    """Listet Nodes der Szene, optional gefiltert.
+
+    Args:
+        node_type: Node-Typ wie "transform", "mesh", "camera" (leer = alle).
+        pattern: Namensmuster mit Wildcards, z.B. "mcp_*" (leer = alle).
+        limit: Maximale Anzahl zurueckgegebener Namen.
+    """
+    return _value(
+        f"""
+import maya.cmds as cmds
+_type = {node_type!r}
+_pattern = {pattern!r}
+_limit = {int(limit)!r}
+_kwargs = {{"long": True}}
+if _type:
+    _kwargs["type"] = _type
+_args = [_pattern] if _pattern else []
+_found = cmds.ls(*_args, **_kwargs) or []
+{{"count": len(_found), "truncated": len(_found) > _limit, "nodes": _found[:_limit]}}
+"""
+    )
+
+
+@mcp.tool()
+def maya_get_attr(node: str, attr: str) -> dict:
+    """Liest ein Attribut eines Nodes.
+
+    Args:
+        node: Node-Name, z.B. "pCube1".
+        attr: Attributname, z.B. "translateX" oder "translate".
+    """
+    return _value(
+        f"""
+import maya.cmds as cmds
+_plug = "{{}}.{{}}".format({node!r}, {attr!r})
+{{
+    "plug": _plug,
+    "type": cmds.getAttr(_plug, type=True),
+    "value": cmds.getAttr(_plug),
+    "locked": cmds.getAttr(_plug, lock=True),
+}}
+"""
+    )
+
+
+@mcp.tool()
+def maya_set_attr(node: str, attr: str, value: Any) -> dict:
+    """Setzt ein Attribut eines Nodes.
+
+    Args:
+        node: Node-Name.
+        attr: Attributname.
+        value: Zahl, Text, Wahrheitswert oder Liste (z.B. [1, 2, 3] fuer translate).
+    """
+    return _value(
+        f"""
+import maya.cmds as cmds
+_plug = "{{}}.{{}}".format({node!r}, {attr!r})
+_value = {value!r}
+_type = cmds.getAttr(_plug, type=True)
+if _type == "string":
+    cmds.setAttr(_plug, _value, type="string")
+elif isinstance(_value, (list, tuple)):
+    if _type in ("double2", "float2", "double3", "float3", "short2", "short3",
+                 "long2", "long3", "matrix", "doubleArray"):
+        cmds.setAttr(_plug, *_value, type=_type)
+    else:
+        cmds.setAttr(_plug, *_value)
+else:
+    cmds.setAttr(_plug, _value)
+{{"plug": _plug, "type": _type, "value": cmds.getAttr(_plug)}}
+"""
+    )
+
+
+@mcp.tool()
+def maya_select(nodes: list[str], replace: bool = True) -> dict:
+    """Waehlt Nodes aus. Eine leere Liste hebt die Auswahl auf.
+
+    Args:
+        nodes: Node-Namen.
+        replace: True ersetzt die Auswahl, False erweitert sie.
+    """
+    return _value(
+        f"""
+import maya.cmds as cmds
+_nodes = {list(nodes)!r}
+if _nodes:
+    cmds.select(_nodes, replace={bool(replace)!r}, add=not {bool(replace)!r})
+else:
+    cmds.select(clear=True)
+{{"selected": cmds.ls(selection=True, long=True) or []}}
+"""
+    )
+
+
+@mcp.tool()
+def maya_new_scene(force: bool = False) -> dict:
+    """Erstellt eine neue, leere Szene.
+
+    Args:
+        force: True verwirft ungespeicherte Aenderungen ohne Nachfrage.
+    """
+    return _value(
+        f"""
+import maya.cmds as cmds
+cmds.file(new=True, force={bool(force)!r})
+{{"file": cmds.file(query=True, sceneName=True) or "", "node_total": len(cmds.ls())}}
+"""
+    )
+
+
+@mcp.tool()
+def maya_open_file(path: str, force: bool = False) -> dict:
+    """Oeffnet eine Maya-Szene (.ma/.mb).
+
+    Args:
+        path: Absoluter Pfad zur Szenendatei.
+        force: True verwirft ungespeicherte Aenderungen ohne Nachfrage.
+    """
+    return _value(
+        f"""
+import os
+import maya.cmds as cmds
+_path = {path!r}
+if not os.path.isfile(_path):
+    raise IOError("Datei nicht gefunden: " + _path)
+cmds.file(_path, open=True, force={bool(force)!r})
+{{"file": cmds.file(query=True, sceneName=True), "node_total": len(cmds.ls())}}
+""",
+        timeout=max(DEFAULT_TIMEOUT, 120.0),
+    )
+
+
+@mcp.tool()
+def maya_import_file(path: str, file_type: str = "", namespace: str = "") -> dict:
+    """Importiert eine Datei in die aktuelle Szene.
+
+    USD (.usd/.usda/.usdc/.usdz) und FBX werden erkannt und laden das
+    passende Plugin (mayaUsdPlugin bzw. fbxmaya) selbst.
+
+    Args:
+        path: Absoluter Pfad zur Datei.
+        file_type: Maya-Translator erzwingen, z.B. "USD Import", "FBX", "OBJ".
+        namespace: Optionaler Namespace fuer die importierten Nodes.
+    """
+    return _value(
+        f"""
+import os
+import maya.cmds as cmds
+_path = {path!r}
+_type = {file_type!r}
+_namespace = {namespace!r}
+if not os.path.isfile(_path):
+    raise IOError("Datei nicht gefunden: " + _path)
+_ext = os.path.splitext(_path)[1].lower()
+if not _type:
+    if _ext in (".usd", ".usda", ".usdc", ".usdz"):
+        _type = "USD Import"
+    elif _ext == ".fbx":
+        _type = "FBX"
+    elif _ext == ".obj":
+        _type = "OBJ"
+if _type == "USD Import" and not cmds.pluginInfo("mayaUsdPlugin", query=True, loaded=True):
+    cmds.loadPlugin("mayaUsdPlugin")
+if _type == "FBX" and not cmds.pluginInfo("fbxmaya", query=True, loaded=True):
+    cmds.loadPlugin("fbxmaya")
+_kwargs = {{"i": True, "returnNewNodes": True}}
+if _type:
+    _kwargs["type"] = _type
+if _namespace:
+    _kwargs["namespace"] = _namespace
+_new = cmds.file(_path, **_kwargs) or []
+{{"file": _path, "type": _type, "new_node_count": len(_new), "new_nodes": _new[:100]}}
+""",
+        timeout=max(DEFAULT_TIMEOUT, 180.0),
+    )
+
+
+@mcp.tool()
+def maya_set_time(frame: float) -> dict:
+    """Setzt die aktuelle Zeit der Szene auf einen Frame.
+
+    Args:
+        frame: Ziel-Frame.
+    """
+    return _value(
+        f"""
+import maya.cmds as cmds
+cmds.currentTime({float(frame)!r}, edit=True)
+{{"current_frame": cmds.currentTime(query=True)}}
+"""
+    )
+
+
+@mcp.tool()
+def maya_screenshot(
+    path: str,
+    width: int = 960,
+    height: int = 540,
+    camera: str = "",
+) -> dict:
+    """Nimmt ein Viewport-Einzelbild des aktuellen Frames als PNG auf.
+
+    Args:
+        path: Absoluter Zielpfad der PNG-Datei.
+        width: Bildbreite in Pixeln.
+        height: Bildhoehe in Pixeln.
+        camera: Kamera fuer die Aufnahme, z.B. "persp" (leer = aktuelle Ansicht).
+    """
+    return _value(
+        f"""
+import os
+import maya.cmds as cmds
+_path = os.path.abspath({path!r})
+_camera = {camera!r}
+os.makedirs(os.path.dirname(_path) or ".", exist_ok=True)
+
+_panel = cmds.getPanel(withFocus=True)
+if _panel not in (cmds.getPanel(type="modelPanel") or []):
+    _panels = cmds.getPanel(visiblePanels=True) or []
+    _models = [p for p in _panels if p in (cmds.getPanel(type="modelPanel") or [])]
+    _panel = _models[0] if _models else None
+if _panel is None:
+    raise RuntimeError("Kein sichtbarer modelPanel-Viewport - laeuft Maya im Batch-Modus?")
+
+if _camera:
+    cmds.lookThru(_panel, _camera)
+cmds.refresh()
+
+_frame = cmds.currentTime(query=True)
+_result = cmds.playblast(
+    completeFilename=_path,
+    format="image",
+    compression="png",
+    forceOverwrite=True,
+    widthHeight=[{int(width)!r}, {int(height)!r}],
+    percent=100,
+    quality=100,
+    startTime=_frame,
+    endTime=_frame,
+    framePadding=4,
+    viewer=False,
+    showOrnaments=False,
+)
+{{
+    "path": _path,
+    "exists": os.path.isfile(_path),
+    "bytes": os.path.getsize(_path) if os.path.isfile(_path) else 0,
+    "panel": _panel,
+    "camera": cmds.modelPanel(_panel, query=True, camera=True),
+    "frame": _frame,
+    "playblast_result": _result,
+}}
+""",
+        timeout=max(DEFAULT_TIMEOUT, 120.0),
+    )
+
+
+if __name__ == "__main__":
+    logger.info("maya-mcp %s -> %s:%s", __version__, DEFAULT_HOST, DEFAULT_PORT)
+    mcp.run(transport="stdio")
