@@ -140,7 +140,13 @@ def maya_exec_mel(code: str, timeout: float = DEFAULT_TIMEOUT) -> dict:
 def maya_status() -> dict:
     """Prueft die Verbindung zu Maya und meldet Version, Prozess-ID und Port."""
     response = _request({"op": "ping"}, DEFAULT_TIMEOUT)
-    return {"host": DEFAULT_HOST, "port": DEFAULT_PORT, **response}
+    version = _value("import maya.cmds as cmds\ncmds.about(version=True)")
+    return {
+        "host": DEFAULT_HOST,
+        "port": DEFAULT_PORT,
+        "maya_version": version,
+        **response,
+    }
 
 
 @mcp.tool()

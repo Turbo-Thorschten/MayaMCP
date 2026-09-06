@@ -125,14 +125,7 @@ def _exec_mel(code):
 def _handle_request(request):
     op = request.get("op")
     if op == "ping":
-        import maya.cmds as cmds
-
-        return {
-            "ok": True,
-            "protocol": PROTOCOL_VERSION,
-            "maya_version": cmds.about(version=True),
-            "pid": os.getpid(),
-        }
+        return {"ok": True, "protocol": PROTOCOL_VERSION, "pid": os.getpid()}
     if op == "exec_python":
         payload = maya.utils.executeInMainThreadWithResult(
             _exec_python, request.get("code", "")
