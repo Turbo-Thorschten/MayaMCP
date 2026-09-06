@@ -17,7 +17,7 @@ import traceback
 
 import maya.utils
 
-DEFAULT_PORT = 50777
+DEFAULT_PORT = 20777
 PROTOCOL_VERSION = 1
 
 _HEADER = struct.Struct(">I")
@@ -188,7 +188,15 @@ def start(port=None):
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("127.0.0.1", port))
+    try:
+        server.bind(("127.0.0.1", port))
+    except OSError as exc:
+        server.close()
+        raise OSError(
+            "Port %d nicht verwendbar (%s). Unter Windows sind Portbereiche "
+            "reserviert; 'netsh interface ipv4 show excludedportrange protocol=tcp' "
+            "zeigt sie. Anderen Port ueber MAYA_MCP_PORT setzen." % (port, exc)
+        ) from exc
     server.listen(8)
 
     thread = threading.Thread(

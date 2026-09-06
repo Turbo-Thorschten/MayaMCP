@@ -18,7 +18,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 __version__ = "1.0.0"
 
 DEFAULT_HOST = os.environ.get("MAYA_MCP_HOST", "127.0.0.1")
-DEFAULT_PORT = int(os.environ.get("MAYA_MCP_PORT", "50777"))
+DEFAULT_PORT = int(os.environ.get("MAYA_MCP_PORT", "20777"))
 DEFAULT_TIMEOUT = float(os.environ.get("MAYA_MCP_TIMEOUT", "30"))
 
 _HEADER = struct.Struct(">I")
