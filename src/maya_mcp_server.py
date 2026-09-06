@@ -381,7 +381,11 @@ def maya_screenshot(
     height: int = 540,
     camera: str = "",
 ) -> dict:
-    """Nimmt ein Viewport-Einzelbild des aktuellen Frames als PNG auf.
+    """Rendert den aktuellen Frame ueber Viewport 2.0 als PNG.
+
+    Nutzt ogsRender statt playblast, weil playblast den Framebuffer des
+    Maya-Fensters liest und leere Bilder liefert, sobald das Fenster verdeckt
+    oder minimiert ist.
 
     Args:
         path: Absoluter Zielpfad der PNG-Datei.
@@ -392,46 +396,42 @@ def maya_screenshot(
     return _value(
         f"""
 import os
+import shutil
 import maya.cmds as cmds
 _path = os.path.abspath({path!r})
 _camera = {camera!r}
 os.makedirs(os.path.dirname(_path) or ".", exist_ok=True)
 
-_panel = cmds.getPanel(withFocus=True)
-if _panel not in (cmds.getPanel(type="modelPanel") or []):
-    _panels = cmds.getPanel(visiblePanels=True) or []
-    _models = [p for p in _panels if p in (cmds.getPanel(type="modelPanel") or [])]
-    _panel = _models[0] if _models else None
-if _panel is None:
-    raise RuntimeError("Kein sichtbarer modelPanel-Viewport - laeuft Maya im Batch-Modus?")
-
-if _camera:
-    cmds.lookThru(_panel, _camera)
-cmds.refresh()
+if not _camera:
+    _models = cmds.getPanel(type="modelPanel") or []
+    _panel = cmds.getPanel(withFocus=True)
+    if _panel not in _models:
+        _visible = [p for p in (cmds.getPanel(visiblePanels=True) or []) if p in _models]
+        _panel = _visible[0] if _visible else (_models[0] if _models else None)
+    if _panel is not None:
+        _camera = cmds.modelPanel(_panel, query=True, camera=True)
+if not _camera:
+    _camera = "persp"
 
 _frame = cmds.currentTime(query=True)
-_result = cmds.playblast(
-    completeFilename=_path,
-    format="image",
-    compression="png",
-    forceOverwrite=True,
-    widthHeight=[{int(width)!r}, {int(height)!r}],
-    percent=100,
-    quality=100,
-    startTime=_frame,
-    endTime=_frame,
-    framePadding=4,
-    viewer=False,
-    showOrnaments=False,
+_rendered = cmds.ogsRender(
+    camera=_camera,
+    width={int(width)!r},
+    height={int(height)!r},
+    currentFrame=True,
 )
+if isinstance(_rendered, (list, tuple)):
+    _rendered = _rendered[0]
+if not _rendered or not os.path.isfile(_rendered):
+    raise RuntimeError("ogsRender lieferte kein Bild: " + repr(_rendered))
+shutil.copyfile(_rendered, _path)
 {{
     "path": _path,
     "exists": os.path.isfile(_path),
-    "bytes": os.path.getsize(_path) if os.path.isfile(_path) else 0,
-    "panel": _panel,
-    "camera": cmds.modelPanel(_panel, query=True, camera=True),
+    "bytes": os.path.getsize(_path),
+    "camera": _camera,
     "frame": _frame,
-    "playblast_result": _result,
+    "rendered_from": _rendered,
 }}
 """,
         timeout=max(DEFAULT_TIMEOUT, 120.0),
