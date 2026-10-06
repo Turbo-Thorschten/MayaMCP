@@ -1,129 +1,128 @@
 # Maya MCP
 
-MCP-Server (Model Context Protocol) für Autodesk Maya 2026 unter Windows.
+MCP server (Model Context Protocol) for Autodesk Maya 2026 on Windows.
 
-Der Server läuft als eigener Prozess und spricht über **stdio** mit dem
-MCP-Client (z. B. Claude Code). In Maya läuft ein **Listener**, der
-längenpräfixierte JSON-Requests auf `127.0.0.1:20777` entgegennimmt und den
-Code über `maya.utils.executeInMainThreadWithResult` im Maya-Hauptthread
-ausführt.
+The server runs as a separate process and talks to the MCP client (e.g.
+Claude Code) over **stdio**. Inside Maya, a **listener** accepts
+length-prefixed JSON requests on `127.0.0.1:20777` and executes the code in
+Maya's main thread via `maya.utils.executeInMainThreadWithResult`.
 
 ```
-Claude Code  --stdio-->  src/maya_mcp_server.py  --TCP/JSON-->  Maya (Listener)
+Claude Code  --stdio-->  src/maya_mcp_server.py  --TCP/JSON-->  Maya (listener)
 ```
 
-## Ursprung
+## Origin
 
-Dieses Projekt geht auf [PatrickPalmer/MayaMCP](https://github.com/PatrickPalmer/MayaMCP)
-zurück (MIT, Copyright (c) 2025 Patrick Palmer, siehe `LICENSE`). Übernommen
-sind die Grundidee und der Aufbau aus MCP-Server plus Maya-Gegenstelle.
+This project is based on [PatrickPalmer/MayaMCP](https://github.com/PatrickPalmer/MayaMCP)
+(MIT, Copyright (c) 2025 Patrick Palmer, see `LICENSE`). It keeps the basic
+idea and the architecture of an MCP server plus a Maya-side counterpart.
 
-Geändert gegenüber dem Original:
+Changes compared to the original:
 
-* **MCP-SDK 2.x**: Das Original nutzt den lowlevel-`Server` und
-  `mcp.server.fastmcp.*`. In `mcp` 2.x wurde FastMCP zu `MCPServer` umbenannt,
-  `mcp.server.fastmcp` existiert nicht mehr. Der Server verwendet jetzt
-  `from mcp.server import MCPServer` mit `@mcp.tool()` und `mcp.run(transport="stdio")`.
-* **Transport zu Maya**: Statt Python-Code in MEL-Strings zu escapen und pro
-  Aufruf zwei Verbindungen auf Mayas MEL-Command-Port zu öffnen, läuft ein
-  eigener Listener mit JSON-Protokoll. Damit entfallen Escaping-Probleme, und
-  stdout, Rückgabewert und Traceback kommen getrennt zurück.
-* **Fester Toolsatz** statt dynamisch geladener Skriptdateien.
+* **MCP SDK 2.x**: The original uses the lowlevel `Server` and
+  `mcp.server.fastmcp.*`. In `mcp` 2.x, FastMCP was renamed to `MCPServer`, and
+  `mcp.server.fastmcp` no longer exists. The server now uses
+  `from mcp.server import MCPServer` with `@mcp.tool()` and `mcp.run(transport="stdio")`.
+* **Transport to Maya**: Instead of escaping Python code into MEL strings and
+  opening two connections to Maya's MEL command port per call, a dedicated
+  listener with a JSON protocol runs inside Maya. This removes escaping issues,
+  and stdout, return value and traceback come back separately.
+* **Fixed tool set** instead of dynamically loaded script files.
 
-`src/mayatools/` stammt unverändert aus dem Original und wird vom neuen Server
-**nicht** geladen.
+`src/mayatools/` is taken unchanged from the original and is **not** loaded by
+the new server.
 
 ## Installation
 
-MCP-Abhängigkeiten kommen in ein eigenes venv, nicht in Mayas Python:
+MCP dependencies go into a separate venv, not into Maya's Python:
 
 ```bash
 uv venv .venv
-uv pip install -r requirements.txt      # oder: pip install -r requirements.txt
+uv pip install -r requirements.txt      # or: pip install -r requirements.txt
 ```
 
-Maya-Modul installieren (legt `%USERPROFILE%\Documents\maya\2026\modules\MayaMCP.mod` an):
+Install the Maya module (creates `%USERPROFILE%\Documents\maya\2026\modules\MayaMCP.mod`):
 
 ```bash
-python install.py                 # Maya-Version über --maya-version wählbar
-python install.py --register      # zusätzlich in Claude Code eintragen
-python install.py --uninstall     # Modul wieder entfernen
+python install.py                 # Maya version selectable via --maya-version
+python install.py --register      # also register with Claude Code
+python install.py --uninstall     # remove the module again
 ```
 
-Das Modul bringt seinen eigenen `scripts`-Ordner mit; dessen `userSetup.py`
-startet den Listener beim Maya-Start. Ein vorhandenes `userSetup.py` des
-Benutzers wird nicht angefasst. Startmeldungen und -fehler landen in
-`%TEMP%\maya_mcp_startup.log`.
+The module ships its own `scripts` folder; its `userSetup.py` starts the
+listener when Maya starts. An existing user `userSetup.py` is left untouched.
+Startup messages and errors are written to `%TEMP%\maya_mcp_startup.log`.
 
-In einem bereits laufenden Maya lässt sich der Listener im Script Editor
-(Python) nachladen:
+In an already running Maya, the listener can be loaded from the Script Editor
+(Python):
 
 ```python
 import sys; sys.path.append(r"<repo>\maya_module\scripts")
 import maya_mcp_listener; maya_mcp_listener.start()
 ```
 
-## Registrierung in Claude Code
+## Registering with Claude Code
 
 ```bash
 claude mcp add --scope user --transport stdio maya -- <repo>\.venv\Scripts\python.exe <repo>\src\maya_mcp_server.py
 claude mcp list
 claude mcp get maya
-claude mcp remove maya --scope user      # entfernen
+claude mcp remove maya --scope user      # remove
 ```
 
-Nach dem Start einer neuen Session stehen die Tools als `mcp__maya__*` bereit.
+After starting a new session, the tools are available as `mcp__maya__*`.
 
 ## Tools
 
-| Tool | Signatur |
-|------|----------|
-| `maya_exec_python` | `(code: str, timeout: float = 30)` – Python im Maya-Hauptthread; liefert stdout, Rückgabewert des letzten Ausdrucks und Traceback |
+| Tool | Signature |
+|------|-----------|
+| `maya_exec_python` | `(code: str, timeout: float = 30)` – Python in Maya's main thread; returns stdout, the value of the last expression and the traceback |
 | `maya_exec_mel` | `(code: str, timeout: float = 30)` |
-| `maya_status` | `()` – Verbindung, Port, Maya-Version, Prozess-ID |
-| `maya_scene_info` | `()` – Datei, Frame-Range, Einheiten, Up-Achse, Node-Anzahl je Typ |
+| `maya_status` | `()` – connection, port, Maya version, process ID |
+| `maya_scene_info` | `()` – file, frame range, units, up axis, node count per type |
 | `maya_list_nodes` | `(node_type: str = "", pattern: str = "", limit: int = 200)` |
 | `maya_get_attr` | `(node: str, attr: str)` |
 | `maya_set_attr` | `(node: str, attr: str, value: Any)` |
 | `maya_select` | `(nodes: list[str], replace: bool = True)` |
 | `maya_new_scene` | `(force: bool = False)` |
 | `maya_open_file` | `(path: str, force: bool = False)` |
-| `maya_import_file` | `(path: str, file_type: str = "", namespace: str = "")` – USD über mayaUsdPlugin, FBX über fbxmaya |
+| `maya_import_file` | `(path: str, file_type: str = "", namespace: str = "")` – USD via mayaUsdPlugin, FBX via fbxmaya |
 | `maya_set_time` | `(frame: float)` |
 | `maya_screenshot` | `(path: str, width: int = 960, height: int = 540, camera: str = "")` |
 
-Der Namensraum in Maya bleibt über Aufrufe hinweg erhalten: in einem Aufruf
-gesetzte Variablen stehen im nächsten noch zur Verfügung.
+The namespace inside Maya persists across calls: variables set in one call are
+still available in the next.
 
-## Konfiguration
+## Configuration
 
-| Variable | Vorgabe | Wirkung |
-|----------|---------|---------|
-| `MAYA_MCP_PORT` | `20777` | Port von Listener und Server |
-| `MAYA_MCP_HOST` | `127.0.0.1` | Adresse, zu der der Server verbindet |
-| `MAYA_MCP_TIMEOUT` | `30` | Vorgabe-Timeout in Sekunden |
-| `MAYA_MCP_AUTOSTART` | `1` | `0` verhindert den Autostart des Listeners |
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `MAYA_MCP_PORT` | `20777` | Port of listener and server |
+| `MAYA_MCP_HOST` | `127.0.0.1` | Address the server connects to |
+| `MAYA_MCP_TIMEOUT` | `30` | Default timeout in seconds |
+| `MAYA_MCP_AUTOSTART` | `1` | `0` prevents the listener from starting automatically |
 
-## Hinweise
+## Notes
 
-* Läuft Maya nicht oder ist der Listener nicht geladen, meldet jedes Tool das
-  als Fehler mit Hinweis auf den Port; der Server blockiert nicht.
-* Antwortet Mayas Hauptthread nicht (modaler Dialog, lange Berechnung), greift
-  das Timeout und meldet genau das.
-* Windows reserviert dynamische Portbereiche
-  (`netsh interface ipv4 show excludedportrange protocol=tcp`). Liegt der Port
-  darin, scheitert `bind` mit WinError 10013 – dann `MAYA_MCP_PORT` ändern.
-* `maya_screenshot` nutzt `ogsRender` (Viewport 2.0) statt `playblast`.
-  `playblast` liest den Framebuffer des Maya-Fensters und liefert leere Bilder,
-  sobald das Fenster verdeckt ist.
+* If Maya is not running or the listener is not loaded, every tool reports
+  this as an error mentioning the port; the server does not block.
+* If Maya's main thread does not respond (modal dialog, long computation), the
+  timeout kicks in and reports exactly that.
+* Windows reserves dynamic port ranges
+  (`netsh interface ipv4 show excludedportrange protocol=tcp`). If the port
+  falls inside one, `bind` fails with WinError 10013 – change `MAYA_MCP_PORT`
+  in that case.
+* `maya_screenshot` uses `ogsRender` (Viewport 2.0) instead of `playblast`.
+  `playblast` reads the framebuffer of the Maya window and returns blank images
+  as soon as the window is covered.
 
 ## Test
 
 ```bash
-.venv\Scripts\python.exe tests\mcp_smoke.py          # voller Durchlauf gegen laufendes Maya
-.venv\Scripts\python.exe tests\mcp_smoke.py --list   # nur tools/list
+.venv\Scripts\python.exe tests\mcp_smoke.py          # full run against a running Maya
+.venv\Scripts\python.exe tests\mcp_smoke.py --list   # tools/list only
 ```
 
-## Lizenz
+## License
 
-MIT, siehe `LICENSE`.
+MIT, see `LICENSE`.
