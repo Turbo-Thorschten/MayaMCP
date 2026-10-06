@@ -1,8 +1,8 @@
-"""Installiert das MayaMCP-Modul fuer Maya und zeigt die Claude-Code-Registrierung.
+"""Installs the MayaMCP module for Maya and shows the Claude Code registration.
 
-    python install.py                 # Modul fuer Maya 2026 installieren
-    python install.py --register      # zusaetzlich in Claude Code eintragen
-    python install.py --uninstall     # Modul-Datei entfernen
+    python install.py                 # install the module for Maya 2026 (Windows, macOS, Linux)
+    python install.py --register      # also register with Claude Code
+    python install.py --uninstall     # remove the module file
 """
 
 import argparse
@@ -17,13 +17,32 @@ MODULE_NAME = "MayaMCP"
 SERVER = REPO / "src" / "maya_mcp_server.py"
 
 
+def windows_documents() -> Path:
+    """Asks Windows for the Documents folder, which OneDrive may have moved."""
+    import ctypes
+    import uuid
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+    folder_id = GUID.from_buffer_copy(uuid.UUID("FDD39AD0-238F-46AF-ADB4-6C85480369C7").bytes_le)
+    path = ctypes.c_wchar_p()
+    if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(folder_id), 0, None, ctypes.byref(path)):
+        return Path(os.environ.get("USERPROFILE", Path.home())) / "Documents"
+    try:
+        return Path(path.value)
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(path)
+
+
 def maya_modules_dir(version: str) -> Path:
-    documents = Path(os.environ.get("USERPROFILE", Path.home())) / "Documents"
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Preferences" / "Autodesk" / "maya" / version / "modules"
     if sys.platform.startswith("linux"):
         return Path.home() / "maya" / version / "modules"
-    return documents / "maya" / version / "modules"
+    return windows_documents() / "maya" / version / "modules"
 
 
 def module_file(version: str) -> Path:
@@ -32,7 +51,7 @@ def module_file(version: str) -> Path:
 
 def install(version: str) -> Path:
     if not (MODULE_ROOT / "scripts" / "maya_mcp_listener.py").is_file():
-        raise SystemExit(f"Listener nicht gefunden unter {MODULE_ROOT}")
+        raise SystemExit(f"Listener not found under {MODULE_ROOT}")
 
     target = module_file(version)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -70,20 +89,20 @@ def main() -> int:
     parser.add_argument("--maya-version", default="2026")
     parser.add_argument("--uninstall", action="store_true")
     parser.add_argument("--register", action="store_true",
-                        help="Server per 'claude mcp add' im User-Scope eintragen")
+                        help="register the server via 'claude mcp add' in user scope")
     args = parser.parse_args()
 
     if args.uninstall:
         removed = uninstall(args.maya_version)
-        print(f"Modul entfernt: {removed}" if removed else "Kein Modul installiert.")
+        print(f"Module removed: {removed}" if removed else "No module installed.")
         print("Claude Code: claude mcp remove maya --scope user")
         return 0
 
     target = install(args.maya_version)
-    print(f"Modul installiert: {target}")
+    print(f"Module installed: {target}")
     print(f"Listener: {MODULE_ROOT / 'scripts' / 'maya_mcp_listener.py'}")
-    print("Maya neu starten - der Listener startet dann automatisch.")
-    print("Im laufenden Maya stattdessen im Script Editor (Python):")
+    print("Restart Maya - the listener then starts automatically.")
+    print("In a running Maya, use the Script Editor (Python) instead:")
     print(f"  import sys; sys.path.append(r'{MODULE_ROOT / 'scripts'}')")
     print("  import maya_mcp_listener; maya_mcp_listener.start()")
 
@@ -92,9 +111,9 @@ def main() -> int:
         print("\n$ " + " ".join(command))
         return subprocess.call(command, shell=(os.name == "nt"))
 
-    print("\nRegistrierung in Claude Code:")
+    print("\nRegistration in Claude Code:")
     print("  " + " ".join(command))
-    print("Entfernen:")
+    print("Remove:")
     print("  claude mcp remove maya --scope user")
     return 0
 

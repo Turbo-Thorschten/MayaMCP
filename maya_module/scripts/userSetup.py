@@ -1,11 +1,11 @@
-"""Startet den Maya-MCP-Listener beim Maya-Start.
+"""Starts the Maya MCP listener when Maya starts.
 
-Maya fuehrt jede userSetup.py aus, die auf dem Python-Pfad liegt; dieses
-Modul bringt seinen eigenen scripts-Ordner mit, ein vorhandenes
-userSetup.py des Benutzers bleibt unangetastet.
+Maya runs every userSetup.py on the Python path; this module ships its own
+scripts folder, so an existing userSetup.py of the user stays untouched.
 
-Startfehler landen in %TEMP%/maya_mcp_startup.log, weil Ausgaben aus
-userSetup.py sonst nur im Script Editor sichtbar waeren.
+Startup errors go to maya_mcp_startup.log in the temp directory
+(Windows %TEMP%, macOS $TMPDIR), because output from userSetup.py would
+otherwise only show up in the Script Editor.
 """
 
 import os
@@ -28,12 +28,12 @@ def _start_maya_mcp():
         import maya_mcp_listener
 
         port = maya_mcp_listener.start()
-        _log("listener gestartet auf port %s" % port)
+        _log("listener started on port %s" % port)
     except Exception:
-        _log("listener-start fehlgeschlagen:\n" + traceback.format_exc())
+        _log("listener start failed:\n" + traceback.format_exc())
 
 
-_log("userSetup.py geladen (pid %d)" % os.getpid())
+_log("userSetup.py loaded (pid %d)" % os.getpid())
 
 if os.environ.get("MAYA_MCP_AUTOSTART", "1") != "0":
     _start_maya_mcp()

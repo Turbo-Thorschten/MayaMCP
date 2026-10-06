@@ -1,7 +1,7 @@
 [project]
 name = "maya-mcp"
 version = "1.0.0"
-description = "MCP-Server fuer Autodesk Maya 2026 (stdio) mit Listener im laufenden Maya"
+description = "MCP server for Autodesk Maya 2026 (stdio) with a listener inside the running Maya"
 requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=2.1.1",

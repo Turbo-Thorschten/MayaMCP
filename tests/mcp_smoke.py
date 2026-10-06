@@ -1,7 +1,7 @@
-"""Startet den Maya-MCP-Server ueber stdio und ruft die Tools real auf.
+"""Starts the Maya MCP server over stdio and calls the tools for real.
 
-    python tests/mcp_smoke.py           # tools/list und alle Pruefaufrufe
-    python tests/mcp_smoke.py --list    # nur tools/list
+    python tests/mcp_smoke.py           # tools/list and all check calls
+    python tests/mcp_smoke.py --list    # tools/list only
 """
 
 import argparse

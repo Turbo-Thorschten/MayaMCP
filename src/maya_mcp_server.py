@@ -1,7 +1,7 @@
-"""MCP-Server fuer Autodesk Maya.
+"""MCP server for Autodesk Maya.
 
-Spricht ueber stdio mit dem MCP-Client und ueber einen lokalen Socket mit dem
-Listener in Maya (maya_module/scripts/maya_mcp_listener.py).
+Talks to the MCP client over stdio and to the listener inside Maya
+(maya_module/scripts/maya_mcp_listener.py) over a local socket.
 """
 
 import json
@@ -34,11 +34,11 @@ mcp = MCPServer("maya")
 
 
 class MayaUnavailable(ToolError):
-    """Maya ist nicht erreichbar; die Nachricht geht an den MCP-Client."""
+    """Maya is unreachable; the message is passed on to the MCP client."""
 
 
 class MayaError(ToolError):
-    """Der Code lief in Maya, endete dort aber mit einem Fehler."""
+    """The code ran in Maya but ended with an error there."""
 
 
 def _recv_exactly(sock: socket.socket, size: int) -> bytes:
@@ -48,8 +48,8 @@ def _recv_exactly(sock: socket.socket, size: int) -> bytes:
         chunk = sock.recv(min(remaining, 65536))
         if not chunk:
             raise MayaUnavailable(
-                "Verbindung zu Maya wurde waehrend der Antwort geschlossen "
-                "(Maya beendet, Szene abgestuerzt oder Listener gestoppt)."
+                "Connection to Maya was closed during the response "
+                "(Maya exited, scene crashed or listener stopped)."
             )
         chunks.append(chunk)
         remaining -= len(chunk)
@@ -62,9 +62,9 @@ def _request(payload: dict, timeout: float) -> dict:
         sock = socket.create_connection(address, timeout=timeout)
     except (ConnectionRefusedError, OSError) as exc:
         raise MayaUnavailable(
-            f"Keine Verbindung zum Maya-MCP-Listener auf {DEFAULT_HOST}:{DEFAULT_PORT} "
-            f"({exc.__class__.__name__}: {exc}). Laeuft Maya 2026 mit installiertem "
-            "MayaMCP-Modul? Im Script Editor pruefen mit: "
+            f"No connection to the Maya MCP listener on {DEFAULT_HOST}:{DEFAULT_PORT} "
+            f"({exc.__class__.__name__}: {exc}). Is Maya running with the MayaMCP "
+            "module installed? Check in the Script Editor with: "
             "import maya_mcp_listener; maya_mcp_listener.start()"
         ) from exc
 
@@ -77,9 +77,9 @@ def _request(payload: dict, timeout: float) -> dict:
         return json.loads(_recv_exactly(sock, size).decode("utf-8"))
     except socket.timeout as exc:
         raise MayaUnavailable(
-            f"Zeitueberschreitung nach {timeout}s. Maya antwortet nicht - der "
-            "Hauptthread ist belegt (modaler Dialog, laufende Berechnung) oder der "
-            "Code laeuft zu lange. Timeout-Argument erhoehen oder Maya pruefen."
+            f"Timed out after {timeout}s. Maya is not responding - the main "
+            "thread is busy (modal dialog, running computation) or the code "
+            "runs too long. Increase the timeout argument or check Maya."
         ) from exc
     finally:
         sock.close()
@@ -90,7 +90,7 @@ def _exec(code: str, timeout: float = DEFAULT_TIMEOUT, mel: bool = False) -> dic
         {"op": "exec_mel" if mel else "exec_python", "code": code}, timeout
     )
     if not response.get("ok"):
-        raise MayaError(response.get("error", "Unbekannter Listener-Fehler"))
+        raise MayaError(response.get("error", "Unknown listener error"))
     return response
 
 
@@ -100,7 +100,7 @@ def _value(code: str, timeout: float = DEFAULT_TIMEOUT) -> Any:
         raise MayaError(response["traceback"].strip())
     if not response.get("result_jsonable", True):
         raise MayaError(
-            "Rueckgabewert ist nicht JSON-serialisierbar: "
+            "Return value is not JSON serializable: "
             f"{response.get('result_repr')}"
         )
     return response.get("result")
@@ -108,37 +108,37 @@ def _value(code: str, timeout: float = DEFAULT_TIMEOUT) -> Any:
 
 @mcp.tool()
 def maya_exec_python(code: str, timeout: float = DEFAULT_TIMEOUT) -> dict:
-    """Fuehrt Python-Code im laufenden Maya aus (maya.cmds, maya.api.OpenMaya,
-    pymel falls installiert).
+    """Runs Python code in the running Maya (maya.cmds, maya.api.OpenMaya,
+    pymel if installed).
 
-    Der Code laeuft im Maya-Hauptthread in einem persistenten Namensraum, der
-    ueber Aufrufe hinweg erhalten bleibt. Ist das letzte Statement ein Ausdruck,
-    wird sein Wert zurueckgegeben.
+    The code runs in Maya's main thread in a persistent namespace that
+    survives across calls. If the last statement is an expression, its value
+    is returned.
 
     Args:
-        code: Python-Quelltext, mehrzeilig erlaubt.
-        timeout: Sekunden, die auf Mayas Antwort gewartet wird.
+        code: Python source, multiple lines allowed.
+        timeout: Seconds to wait for Maya's response.
 
     Returns:
-        stdout, result (falls JSON-faehig), result_repr und traceback.
+        stdout, result (if JSON serializable), result_repr and traceback.
     """
     return _exec(code, timeout)
 
 
 @mcp.tool()
 def maya_exec_mel(code: str, timeout: float = DEFAULT_TIMEOUT) -> dict:
-    """Fuehrt MEL-Code im laufenden Maya aus.
+    """Runs MEL code in the running Maya.
 
     Args:
-        code: MEL-Quelltext.
-        timeout: Sekunden, die auf Mayas Antwort gewartet wird.
+        code: MEL source.
+        timeout: Seconds to wait for Maya's response.
     """
     return _exec(code, timeout, mel=True)
 
 
 @mcp.tool()
 def maya_status() -> dict:
-    """Prueft die Verbindung zu Maya und meldet Version, Prozess-ID und Port."""
+    """Checks the connection to Maya and reports version, process ID and port."""
     response = _request({"op": "ping"}, DEFAULT_TIMEOUT)
     version = _value("import maya.cmds as cmds\ncmds.about(version=True)")
     return {
@@ -151,8 +151,8 @@ def maya_status() -> dict:
 
 @mcp.tool()
 def maya_scene_info() -> dict:
-    """Liefert Szenendatei, Frame-Range, Einheiten, Up-Achse und die
-    Node-Anzahl je Typ der aktuellen Maya-Szene."""
+    """Returns scene file, frame range, units, up axis and the node count
+    per type of the current Maya scene."""
     return _value(
         """
 import maya.cmds as cmds
@@ -179,12 +179,12 @@ _counts = Counter(cmds.nodeType(n) for n in _nodes)
 
 @mcp.tool()
 def maya_list_nodes(node_type: str = "", pattern: str = "", limit: int = 200) -> dict:
-    """Listet Nodes der Szene, optional gefiltert.
+    """Lists scene nodes, optionally filtered.
 
     Args:
-        node_type: Node-Typ wie "transform", "mesh", "camera" (leer = alle).
-        pattern: Namensmuster mit Wildcards, z.B. "mcp_*" (leer = alle).
-        limit: Maximale Anzahl zurueckgegebener Namen.
+        node_type: Node type such as "transform", "mesh", "camera" (empty = all).
+        pattern: Name pattern with wildcards, e.g. "mcp_*" (empty = all).
+        limit: Maximum number of returned names.
     """
     return _value(
         f"""
@@ -204,11 +204,11 @@ _found = cmds.ls(*_args, **_kwargs) or []
 
 @mcp.tool()
 def maya_get_attr(node: str, attr: str) -> dict:
-    """Liest ein Attribut eines Nodes.
+    """Reads an attribute of a node.
 
     Args:
-        node: Node-Name, z.B. "pCube1".
-        attr: Attributname, z.B. "translateX" oder "translate".
+        node: Node name, e.g. "pCube1".
+        attr: Attribute name, e.g. "translateX" or "translate".
     """
     return _value(
         f"""
@@ -226,12 +226,12 @@ _plug = "{{}}.{{}}".format({node!r}, {attr!r})
 
 @mcp.tool()
 def maya_set_attr(node: str, attr: str, value: Any) -> dict:
-    """Setzt ein Attribut eines Nodes.
+    """Sets an attribute of a node.
 
     Args:
-        node: Node-Name.
-        attr: Attributname.
-        value: Zahl, Text, Wahrheitswert oder Liste (z.B. [1, 2, 3] fuer translate).
+        node: Node name.
+        attr: Attribute name.
+        value: Number, string, boolean or list (e.g. [1, 2, 3] for translate).
     """
     return _value(
         f"""
@@ -242,8 +242,12 @@ _type = cmds.getAttr(_plug, type=True)
 if _type == "string":
     cmds.setAttr(_plug, _value, type="string")
 elif isinstance(_value, (list, tuple)):
-    if _type in ("double2", "float2", "double3", "float3", "short2", "short3",
-                 "long2", "long3", "matrix", "doubleArray"):
+    if _type in ("doubleArray", "Int32Array"):
+        cmds.setAttr(_plug, list(_value), type=_type)
+    elif _type == "stringArray":
+        cmds.setAttr(_plug, len(_value), *_value, type=_type)
+    elif _type in ("double2", "float2", "double3", "float3", "short2", "short3",
+                   "long2", "long3", "matrix"):
         cmds.setAttr(_plug, *_value, type=_type)
     else:
         cmds.setAttr(_plug, *_value)
@@ -256,11 +260,11 @@ else:
 
 @mcp.tool()
 def maya_select(nodes: list[str], replace: bool = True) -> dict:
-    """Waehlt Nodes aus. Eine leere Liste hebt die Auswahl auf.
+    """Selects nodes. An empty list clears the selection.
 
     Args:
-        nodes: Node-Namen.
-        replace: True ersetzt die Auswahl, False erweitert sie.
+        nodes: Node names.
+        replace: True replaces the selection, False adds to it.
     """
     return _value(
         f"""
@@ -277,10 +281,10 @@ else:
 
 @mcp.tool()
 def maya_new_scene(force: bool = False) -> dict:
-    """Erstellt eine neue, leere Szene.
+    """Creates a new, empty scene.
 
     Args:
-        force: True verwirft ungespeicherte Aenderungen ohne Nachfrage.
+        force: True discards unsaved changes without asking.
     """
     return _value(
         f"""
@@ -293,11 +297,11 @@ cmds.file(new=True, force={bool(force)!r})
 
 @mcp.tool()
 def maya_open_file(path: str, force: bool = False) -> dict:
-    """Oeffnet eine Maya-Szene (.ma/.mb).
+    """Opens a Maya scene (.ma/.mb).
 
     Args:
-        path: Absoluter Pfad zur Szenendatei.
-        force: True verwirft ungespeicherte Aenderungen ohne Nachfrage.
+        path: Absolute path to the scene file.
+        force: True discards unsaved changes without asking.
     """
     return _value(
         f"""
@@ -305,7 +309,7 @@ import os
 import maya.cmds as cmds
 _path = {path!r}
 if not os.path.isfile(_path):
-    raise IOError("Datei nicht gefunden: " + _path)
+    raise IOError("File not found: " + _path)
 cmds.file(_path, open=True, force={bool(force)!r})
 {{"file": cmds.file(query=True, sceneName=True), "node_total": len(cmds.ls())}}
 """,
@@ -315,15 +319,15 @@ cmds.file(_path, open=True, force={bool(force)!r})
 
 @mcp.tool()
 def maya_import_file(path: str, file_type: str = "", namespace: str = "") -> dict:
-    """Importiert eine Datei in die aktuelle Szene.
+    """Imports a file into the current scene.
 
-    USD (.usd/.usda/.usdc/.usdz) und FBX werden erkannt und laden das
-    passende Plugin (mayaUsdPlugin bzw. fbxmaya) selbst.
+    USD (.usd/.usda/.usdc/.usdz) and FBX are detected and load the matching
+    plugin (mayaUsdPlugin or fbxmaya) on their own.
 
     Args:
-        path: Absoluter Pfad zur Datei.
-        file_type: Maya-Translator erzwingen, z.B. "USD Import", "FBX", "OBJ".
-        namespace: Optionaler Namespace fuer die importierten Nodes.
+        path: Absolute path to the file.
+        file_type: Force a Maya translator, e.g. "USD Import", "FBX", "OBJ".
+        namespace: Optional namespace for the imported nodes.
     """
     return _value(
         f"""
@@ -333,7 +337,7 @@ _path = {path!r}
 _type = {file_type!r}
 _namespace = {namespace!r}
 if not os.path.isfile(_path):
-    raise IOError("Datei nicht gefunden: " + _path)
+    raise IOError("File not found: " + _path)
 _ext = os.path.splitext(_path)[1].lower()
 if not _type:
     if _ext in (".usd", ".usda", ".usdc", ".usdz"):
@@ -360,10 +364,10 @@ _new = cmds.file(_path, **_kwargs) or []
 
 @mcp.tool()
 def maya_set_time(frame: float) -> dict:
-    """Setzt die aktuelle Zeit der Szene auf einen Frame.
+    """Sets the scene's current time to a frame.
 
     Args:
-        frame: Ziel-Frame.
+        frame: Target frame.
     """
     return _value(
         f"""
@@ -381,17 +385,17 @@ def maya_screenshot(
     height: int = 540,
     camera: str = "",
 ) -> dict:
-    """Rendert den aktuellen Frame ueber Viewport 2.0 als PNG.
+    """Renders the current frame through Viewport 2.0 as PNG.
 
-    Nutzt ogsRender statt playblast, weil playblast den Framebuffer des
-    Maya-Fensters liest und leere Bilder liefert, sobald das Fenster verdeckt
-    oder minimiert ist.
+    Uses ogsRender instead of playblast, because playblast reads the
+    framebuffer of the Maya window and returns blank images as soon as the
+    window is covered or minimized.
 
     Args:
-        path: Absoluter Zielpfad der PNG-Datei.
-        width: Bildbreite in Pixeln.
-        height: Bildhoehe in Pixeln.
-        camera: Kamera fuer die Aufnahme, z.B. "persp" (leer = aktuelle Ansicht).
+        path: Absolute target path of the PNG file.
+        width: Image width in pixels.
+        height: Image height in pixels.
+        camera: Camera to shoot from, e.g. "persp" (empty = current view).
     """
     return _value(
         f"""
@@ -414,16 +418,21 @@ if not _camera:
     _camera = "persp"
 
 _frame = cmds.currentTime(query=True)
-_rendered = cmds.ogsRender(
-    camera=_camera,
-    width={int(width)!r},
-    height={int(height)!r},
-    currentFrame=True,
-)
+_format = cmds.getAttr("defaultRenderGlobals.imageFormat")
+cmds.setAttr("defaultRenderGlobals.imageFormat", 32)
+try:
+    _rendered = cmds.ogsRender(
+        camera=_camera,
+        width={int(width)!r},
+        height={int(height)!r},
+        currentFrame=True,
+    )
+finally:
+    cmds.setAttr("defaultRenderGlobals.imageFormat", _format)
 if isinstance(_rendered, (list, tuple)):
     _rendered = _rendered[0]
 if not _rendered or not os.path.isfile(_rendered):
-    raise RuntimeError("ogsRender lieferte kein Bild: " + repr(_rendered))
+    raise RuntimeError("ogsRender produced no image: " + repr(_rendered))
 shutil.copyfile(_rendered, _path)
 {{
     "path": _path,

@@ -1,8 +1,8 @@
-"""Maya-seitiger Listener fuer den Maya-MCP-Server.
+"""Maya-side listener for the Maya MCP server.
 
-Laeuft in Maya und nimmt auf einem lokalen Socket laengenpraefixierte
-JSON-Requests entgegen. Der eigentliche Code wird immer im Maya-Hauptthread
-ausgefuehrt, weil maya.cmds aus einem anderen Thread nicht sicher ist.
+Runs inside Maya and accepts length-prefixed JSON requests on a local
+socket. The actual code always runs in Maya's main thread, because
+maya.cmds is not safe to call from another thread.
 """
 
 import ast
@@ -160,9 +160,13 @@ def _serve_client(conn):
 
 
 def _serve(server):
-    while True:
+    # close() does not wake a blocking accept() on macOS/Linux, so the loop
+    # polls with a timeout to notice stop().
+    while _state["server"] is server:
         try:
             conn, _ = server.accept()
+        except socket.timeout:
+            continue
         except OSError:
             return
         conn.settimeout(None)
@@ -180,24 +184,35 @@ def start(port=None):
         port = int(os.environ.get("MAYA_MCP_PORT", DEFAULT_PORT))
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # On Windows SO_REUSEADDR lets a second Maya bind the same port silently;
+    # SO_EXCLUSIVEADDRUSE claims it exclusively there.
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         server.bind(("127.0.0.1", port))
     except OSError as exc:
         server.close()
+        hint = "Is another Maya with the listener already running?"
+        if os.name == "nt":
+            hint += (
+                " Windows may reserve port ranges; "
+                "'netsh interface ipv4 show excludedportrange protocol=tcp' lists them."
+            )
         raise OSError(
-            "Port %d nicht verwendbar (%s). Unter Windows sind Portbereiche "
-            "reserviert; 'netsh interface ipv4 show excludedportrange protocol=tcp' "
-            "zeigt sie. Anderen Port ueber MAYA_MCP_PORT setzen." % (port, exc)
+            "Port %d is not usable (%s). %s Set a different port via "
+            "MAYA_MCP_PORT." % (port, exc, hint)
         ) from exc
     server.listen(8)
+    server.settimeout(0.5)
 
+    _state.update({"server": server, "port": port})
     thread = threading.Thread(
         target=_serve, args=(server,), daemon=True, name="maya-mcp-listener"
     )
     thread.start()
-
-    _state.update({"server": server, "thread": thread, "port": port})
+    _state["thread"] = thread
     print("Maya MCP listener on 127.0.0.1:%d" % port)
     return port
 
